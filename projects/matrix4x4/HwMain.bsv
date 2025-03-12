@@ -49,7 +49,7 @@ module mkPE(PEIfc);
 		//$write( "Accumulating product = %x\n", product );
    	endrule
 
-   	rule updateSum (!resultReady);
+   	rule updateSum (!resultReady && !isRegSumReady);
       	let newSum <- fadd.get;
       	regSum <= newSum;
 		isRegSumReady <= True;
@@ -252,7 +252,7 @@ module mkHwMain#(Ulx3sSdramUserIfc mem) (HwMainIfc);
 			end
 			inputEnqueued <= inputEnqueued + 1;
 
-			if (inputEnqueued == 31 ) begin
+			if (inputEnqueued == 31) begin
 				processingStartCycle <= cycles;
 			end
 		end
