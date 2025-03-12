@@ -24,6 +24,7 @@ module mkPE(PEInterface);
 
     Reg#(Bool)     hasA        <- mkReg(False);
     Reg#(Bool)     hasB        <- mkReg(False);
+	Reg#(Bit#(2))  count       <- mkReg(0);
     Reg#(Bool)     resultReady <- mkReg(False);
 
     FloatTwoOp fmult <- mkFloatMult;
@@ -45,15 +46,19 @@ module mkPE(PEInterface);
    	rule updateSum;
       	let newSum <- fadd.get;
       	regSum <= newSum;
-      	resultReady <= True;
+      	count <= count + 1;
+		if (count == 3) begin
+			resultReady <= True;
+			count <= 0;
+		end
    	endrule
 
-	method Action receiveA (Bit#(32) a_in);
+	method Action receiveA (Bit#(32) a_in) if (!hasA);
         regA <= a_in;
       	hasA <= True;
    	endmethod
 
-   	method Action receiveB(Bit#(32) b_in);
+   	method Action receiveB(Bit#(32) b_in) if (!hasB);
       	regB <= b_in;
       	hasB <= True;
    	endmethod
@@ -72,7 +77,84 @@ module mkPE(PEInterface);
     endmethod
 endmodule
 
+interface MatrixMultiplierInterface;
+	method Action loadMatrixA(Vector#(4, Vector#(4, Bit#(32))) matrixA);
+	method Action loadMatrixB(Vector#(4, Vector#(4, Bit#(32))) matrixB);
+	method ActionValue#(Vector#(4, Vector#(4, Bit#(32)))) getResult();
+endinterface
 
+module mkSystolicArray(MatrixMultiplierInterface);
+
+	PEInterface pes[4][4];
+	for (Integer i = 0; i < 4; i = i + 1) begin
+		for (Integer j = 0; j < 4; j = j + 1) begin
+			pes[i][j] <- mkPE;
+		end
+	end
+
+	FIFO#(Bit#(32)) fifoA[4][5]; // Additional column for input
+	FIFO#(Bit#(32)) fifoB[5][4]; // Additional row for input
+
+	for (Integer i = 0; i < 4; i = i + 1) begin
+		for (Integer j = 0; j < 5; j = j + 1) begin
+			fifoA[i][j] <- mkFIFO;
+		end
+	end
+	for (Integer i = 0; i < 5; i = i + 1) begin
+		for (Integer j = 0; j < 4; j = j + 1) begin
+			fifoB[i][j] <- mkFIFO;
+		end
+	end
+
+	// Rules to pass A and B through the array
+	for (Integer i = 0; i < 4; i = i + 1) begin
+		for (Integer j = 0; j < 4; j = j + 1) begin
+			rule passA;
+				fifoA[i][j].deq;
+				pes[i][j].receiveA(fifoA[i][j].first);
+				fifoA[i][j+1].enq(fifoA[i][j].first);
+			endrule
+
+			// Pass B to the PE and to the next FIFO
+			rule passB;
+				fifoB[i][j].deq;
+				pes[i][j].receiveB(fifoB[i][j].first);
+				fifoB[i+1][j].enq(fifoB[i][j].first);
+			endrule
+		end
+	end
+
+	method Action loadMatrixA(Vector#(4, Vector#(4, Bit#(32))) matrixA);
+		// Enqueue matrix A elements into fifoA[i][0]
+		for (Integer i = 0; i < 4; i = i + 1) begin
+			for (Integer k = 0; k < 4; k = k + 1) begin
+				fifoA[i][0].enq(matrixA[i][k]);
+			end
+		end
+	endmethod
+
+	method Action loadMatrixB(Vector#(4, Vector#(4, Bit#(32))) matrixB);
+		// Enqueue matrix B elements into fifoB[0][j]
+		for (Integer k = 0; k < 4; k = k + 1) begin
+			for (Integer j = 0; j < 4; j = j + 1) begin
+				fifoB[0][j].enq(matrixB[k][j]);
+			end
+		end
+	endmethod
+
+
+	method ActionValue#(Vector#(4, Vector#(4, Bit#(32)))) getResult();
+		Vector#(4, Vector#(4, Bit#(32))) result = replicate(replicate(0));
+		for (Integer i = 0; i < 4; i = i + 1) begin
+			for (Integer j = 0; j < 4; j = j + 1) begin
+				let val <- pes[i][j].getResult();
+				result[i][j] = val;
+			end
+		end
+		return result;
+	endmethod
+
+endmodule
 
 interface HwMainIfc;
 	method ActionValue#(Bit#(8)) serial_tx;
