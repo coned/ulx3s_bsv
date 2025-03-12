@@ -26,7 +26,7 @@ module mkPE(PEIfc);
     Reg#(Bool)     hasB        <- mkReg(False);
 	Reg#(Bool)     isSendA     <- mkReg(True); // True if A is sent
 	Reg#(Bool)     isSendB     <- mkReg(True);
-	Reg#(Bit#(3))  count       <- mkReg(0);
+	Reg#(Bit#(2))  count       <- mkReg(0);
     Reg#(Bool)     resultReady <- mkReg(False);
 
     FloatTwoOp fmult <- mkFloatMult;
@@ -38,23 +38,24 @@ module mkPE(PEIfc);
       	fmult.put(a_float, b_float);
       	hasA <= False;
       	hasB <= False;
-		// $write( "Multiplying A = %x, B = %x\n", regA, regB );
+		//$write( "Multiplying A = %x, B = %x\n", a_float, b_float );
    	endrule
 
    	rule accumulate;
       	let product <- fmult.get;
       	fadd.put(regSum, product);
-		// $write( "Accumulating product = %x\n", product );
+		//$write( "Accumulating product = %x\n", product );
    	endrule
 
    	rule updateSum (!resultReady);
       	let newSum <- fadd.get;
       	regSum <= newSum;
-		// $write( "New sum = %x, new count = %d\n", newSum, count + 1 );
+		//$write( "New sum = %x, new count = %d\n", newSum, count + 1 );
 
-      	count <= count + 1;
-		if (count == 4) begin
+		if (count == 3) begin
 			resultReady <= True;
+		end else begin
+      		count <= count + 1;
 		end
    	endrule
 
@@ -112,10 +113,10 @@ module mkHwMain#(Ulx3sSdramUserIfc mem) (HwMainIfc);
 	Reg#(Bit#(3)) loadMatrixACol <- mkReg(0);
 	Reg#(Bit#(3)) loadMatrixBCol <- mkReg(0);
 
-	rule loadMatirxA (loadMatrixARow < 4 && loadMatrixACol < 4);
+	rule loadMatrixA;
 		inputAQ.deq;
 		matrixA[loadMatrixARow].enq(unpack(inputAQ.first));
-		// $write( "Loading A[%d][%d] = %x\n", loadMatrixARow, loadMatrixACol, inputAQ.first );
+		//$write( "Loading A[%d][%d] = %x\n", loadMatrixARow, loadMatrixACol, inputAQ.first );
 		if (loadMatrixARow == 3 && loadMatrixACol == 3) begin
 			// Finished loading matrix A
 		end else if (loadMatrixACol == 3) begin
@@ -126,10 +127,10 @@ module mkHwMain#(Ulx3sSdramUserIfc mem) (HwMainIfc);
 		end
 	endrule
 
-	rule loadMatirxB (loadMatrixBRow < 4 && loadMatrixBCol < 4);
+	rule loadMatrixB;
 		inputBQ.deq;
 		matrixB[loadMatrixBCol].enq(unpack(inputBQ.first));
-		// $write( "Loading B[%d][%d] = %x\n", loadMatrixBRow, loadMatrixBCol, inputBQ.first );
+		//$write( "Loading B[%d][%d] = %x\n", loadMatrixBRow, loadMatrixBCol, inputBQ.first );
 		if (loadMatrixBRow == 3 && loadMatrixBCol == 3) begin
 			// Finished loading matrix B
 		end else if (loadMatrixBCol == 3) begin
@@ -151,38 +152,39 @@ module mkHwMain#(Ulx3sSdramUserIfc mem) (HwMainIfc);
 		rule sendMatrixA;
 			matrixA[i].deq;
 			pes[i][0].receiveA(pack(matrixA[i].first));
-			$write( "A [%d][          ?] -> PE[%d][          0]\n", i, i);
+			//$write( "A [%d][          ?] -> PE[%d][          0]\n", i, i);
 		endrule
 
 		rule sendMatrixB;
 			matrixB[i].deq;
 			pes[0][i].receiveB(pack(matrixB[i].first));
-			$write( "B [          ?][%d] -> PE[          0][%d]\n", i, i);
+			//$write( "B [          ?][%d] -> PE[          0][%d]\n", i, i);
 		endrule
 	end
 
 	for (Integer i = 0; i < 4; i = i + 1) begin
-		for (Integer j = 0; j + 1< 4; j = j + 1) begin
+		for (Integer j = 0; j < 4; j = j + 1) begin
 			rule sendAToPE;
 				let a <- pes[i][j].sendA();
-				pes[i][j + 1].receiveA(a);
-				$write( "PE[%d][%d] -> PE[%d][%d]\n", i, j, i, j + 1 );
+				if (j + 1 < 4) begin
+					pes[i][j + 1].receiveA(a);
+					//$write( "PE[%d][%d] -> PE[%d][%d]\n", i, j, i, j + 1 );
+				end
 			endrule
-		end
-	end
 
-	for (Integer i = 0; i + 1 < 4; i = i + 1) begin
-		for (Integer j = 0; j < 4; j = j + 1) begin
 			rule sendBToPE;
 				let b <- pes[i][j].sendB();
-				pes[i + 1][j].receiveB(b);
-				$write( "PE[%d][%d] -> PE[%d][%d]\n", i, j, i + 1, j );
+				if (i + 1 < 4) begin
+					pes[i + 1][j].receiveB(b);
+					//$write( "PE[%d][%d] -> PE[%d][%d]\n", i, j, i + 1, j );
+				end
 			endrule
 		end
 	end
 
-
-	rule finishAcceleration;
+	Reg#(Bool) isDone <- mkReg(False);
+	rule finishAcceleration (!isDone);
+		isDone <= True;
 		let r <- pes[3][3].getResult();
 		$write( "Acceleration done! %d cycles\n", cycles - processingStartCycle );
 	endrule
