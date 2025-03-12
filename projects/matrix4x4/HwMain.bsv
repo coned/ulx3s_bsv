@@ -41,15 +41,18 @@ module mkPE(PEIfc);
 		//$write( "Multiplying A = %x, B = %x\n", a_float, b_float );
    	endrule
 
-   	rule accumulate;
+	Reg#(Bool) isRegSumReady <- mkReg(True);
+   	rule accumulate (isRegSumReady);
       	let product <- fmult.get;
       	fadd.put(regSum, product);
+		isRegSumReady <= False;
 		//$write( "Accumulating product = %x\n", product );
    	endrule
 
    	rule updateSum (!resultReady);
       	let newSum <- fadd.get;
       	regSum <= newSum;
+		isRegSumReady <= True;
 		//$write( "New sum = %x, new count = %d\n", newSum, count + 1 );
 
 		if (count == 3) begin
@@ -129,7 +132,7 @@ module mkHwMain#(Ulx3sSdramUserIfc mem) (HwMainIfc);
 
 	rule loadMatrixB;
 		inputBQ.deq;
-		matrixB[loadMatrixBCol].enq(unpack(inputBQ.first));
+		matrixB[loadMatrixBRow].enq(unpack(inputBQ.first));
 		//$write( "Loading B[%d][%d] = %x\n", loadMatrixBRow, loadMatrixBCol, inputBQ.first );
 		if (loadMatrixBRow == 3 && loadMatrixBCol == 3) begin
 			// Finished loading matrix B
