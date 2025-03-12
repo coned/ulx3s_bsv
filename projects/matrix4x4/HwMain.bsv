@@ -9,6 +9,71 @@ import Sdram::*;
 import SimpleFloat::*;
 import FloatingPoint::*;
 
+interface PEInterface;
+	method Action receiveA(Bit#(32) a_in);
+	method Action receiveB(Bit#(32) b_in);
+	method ActionValue#(Bit#(32)) sendA();
+	method ActionValue#(Bit#(32)) sendB();
+	method ActionValue#(Bit#(32)) getResult();
+endinterface
+
+module mkPE(PEInterface);
+    Reg#(Bit#(32)) regA        <- mkReg(0);
+    Reg#(Bit#(32)) regB        <- mkReg(0);
+    Reg#(Float)    regSum      <- mkReg(0);
+
+    Reg#(Bool)     hasA        <- mkReg(False);
+    Reg#(Bool)     hasB        <- mkReg(False);
+    Reg#(Bool)     resultReady <- mkReg(False);
+
+    FloatTwoOp fmult <- mkFloatMult;
+    FloatTwoOp fadd  <- mkFloatAdd;
+
+   	rule multiply (hasA && hasB);
+        Float a_float = unpack(regA);
+        Float b_float = unpack(regB);
+      	fmult.put(a_float, b_float);
+      	hasA <= False; // Clear flags after using the data
+      	hasB <= False;
+   	endrule
+
+   	rule accumulate;
+      	let product <- fmult.get;
+      	fadd.put(regSum, product);
+   	endrule
+
+   	rule updateSum;
+      	let newSum <- fadd.get;
+      	regSum <= newSum;
+      	resultReady <= True;
+   	endrule
+
+	method Action receiveA (Bit#(32) a_in);
+        regA <= a_in;
+      	hasA <= True;
+   	endmethod
+
+   	method Action receiveB(Bit#(32) b_in);
+      	regB <= b_in;
+      	hasB <= True;
+   	endmethod
+
+   	method ActionValue#(Bit#(32)) sendA() if (hasA);
+      	return regA;
+   	endmethod
+
+   	method ActionValue#(Bit#(32)) sendB() if (hasB);
+      	return regB;
+   	endmethod
+
+    method ActionValue#(Bit#(32)) getResult() if (resultReady);
+        resultReady <= False;
+        return pack(regSum);
+    endmethod
+endmodule
+
+
+
 interface HwMainIfc;
 	method ActionValue#(Bit#(8)) serial_tx;
 	method Action serial_rx(Bit#(8) rx);
