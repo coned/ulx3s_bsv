@@ -9,22 +9,24 @@ import Sdram::*;
 import SimpleFloat::*;
 import FloatingPoint::*;
 
-interface PEInterface;
-	method Action receiveA(Bit#(8) a_in);
-	method Action receiveB(Bit#(8) b_in);
-	method ActionValue#(Bit#(8)) sendA();
-	method ActionValue#(Bit#(8)) sendB();
-	method ActionValue#(Bit#(8)) getResult();
+interface PEIfc;
+	method Action receiveA(Bit#(32) a_in);
+	method Action receiveB(Bit#(32) b_in);
+	method ActionValue#(Bit#(32)) sendA();
+	method ActionValue#(Bit#(32)) sendB();
+	method ActionValue#(Bit#(32)) getResult();
 endinterface
 
-module mkPE(PEInterface);
-    Reg#(Bit#(8)) regA        <- mkReg(0);
-    Reg#(Bit#(8)) regB        <- mkReg(0);
+module mkPE(PEIfc);
+    Reg#(Bit#(32)) regA        <- mkReg(0);
+    Reg#(Bit#(32)) regB        <- mkReg(0);
     Reg#(Float)    regSum      <- mkReg(0);
 
-    Reg#(Bool)     hasA        <- mkReg(False);
+    Reg#(Bool)     hasA        <- mkReg(False); // True if A is received and not yet multiplied
     Reg#(Bool)     hasB        <- mkReg(False);
-	Reg#(Bit#(2))  count       <- mkReg(0);
+	Reg#(Bool)     isSendA     <- mkReg(True); // True if A is sent
+	Reg#(Bool)     isSendB     <- mkReg(True);
+	Reg#(Bit#(3))  count       <- mkReg(0);
     Reg#(Bool)     resultReady <- mkReg(False);
 
     FloatTwoOp fmult <- mkFloatMult;
@@ -34,233 +36,220 @@ module mkPE(PEInterface);
         Float a_float = unpack(regA);
         Float b_float = unpack(regB);
       	fmult.put(a_float, b_float);
-      	hasA <= False; // Clear flags after using the data
+      	hasA <= False;
       	hasB <= False;
+		// $write( "Multiplying A = %x, B = %x\n", regA, regB );
    	endrule
 
    	rule accumulate;
       	let product <- fmult.get;
       	fadd.put(regSum, product);
+		// $write( "Accumulating product = %x\n", product );
    	endrule
 
-   	rule updateSum;
+   	rule updateSum (!resultReady);
       	let newSum <- fadd.get;
       	regSum <= newSum;
+		// $write( "New sum = %x, new count = %d\n", newSum, count + 1 );
+
       	count <= count + 1;
-		if (count == 3) begin
+		if (count == 4) begin
 			resultReady <= True;
-			count <= 0;
 		end
    	endrule
 
-	method Action receiveA (Bit#(8) a_in) if (!hasA);
+	method Action receiveA (Bit#(32) a_in) if (!hasA && isSendA);
         regA <= a_in;
       	hasA <= True;
+		isSendA <= False;
    	endmethod
 
-   	method Action receiveB(Bit#(8) b_in) if (!hasB);
+   	method Action receiveB(Bit#(32) b_in) if (!hasB && isSendB);
       	regB <= b_in;
       	hasB <= True;
+		isSendB <= False;
    	endmethod
 
-   	method ActionValue#(Bit#(8)) sendA() if (hasA);
+   	method ActionValue#(Bit#(32)) sendA() if (!isSendA);
+		isSendA <= True;
       	return regA;
    	endmethod
 
-   	method ActionValue#(Bit#(8)) sendB() if (hasB);
+   	method ActionValue#(Bit#(32)) sendB() if (!isSendB);
+		isSendB <= True;
       	return regB;
    	endmethod
 
-    method ActionValue#(Bit#(8)) getResult() if (resultReady);
-        resultReady <= False;
+    method ActionValue#(Bit#(32)) getResult() if (resultReady);
         return pack(regSum);
     endmethod
 endmodule
 
-interface MatrixMultiplierInterface;
-	method Action loadMatrixA(Vector#(4, Vector#(4, Bit#(8))) matrixA);
-	method Action loadMatrixB(Vector#(4, Vector#(4, Bit#(8))) matrixB);
-	method ActionValue#(Vector#(4, Vector#(4, Bit#(8)))) getResult();
+interface HwMainIfc;
+    method Action serial_rx(Bit#(8) data_in);
+    method ActionValue#(Bit#(8)) serial_tx();
 endinterface
 
-module mkSystolicArray(MatrixMultiplierInterface);
+module mkHwMain#(Ulx3sSdramUserIfc mem) (HwMainIfc);
+	Clock curclk <- exposeCurrentClock;
+	Reset currst <- exposeCurrentReset;
 
-	PEInterface pes[4][4];
+	Reg#(Bit#(32)) cycles <- mkReg(0);
+	rule incCyclecount;
+		cycles <= cycles + 1;
+	endrule
+
+	Reg#(Bit#(32)) processingStartCycle <- mkReg(0);
+	FIFO#(Bit#(32)) inputAQ <- mkSizedBRAMFIFO(32);
+	FIFO#(Bit#(32)) inputBQ <- mkSizedBRAMFIFO(32);
+	FIFO#(Bit#(32)) outputQ <- mkSizedBRAMFIFO(32);
+
+	Vector#(4, FIFO#(Bit#(32))) matrixA <- replicateM(mkSizedBRAMFIFO(32));
+	Vector#(4, FIFO#(Bit#(32))) matrixB <- replicateM(mkSizedBRAMFIFO(32));
+
+	Reg#(Bit#(3)) loadMatrixARow <- mkReg(0);
+	Reg#(Bit#(3)) loadMatrixBRow <- mkReg(0);
+	Reg#(Bit#(3)) loadMatrixACol <- mkReg(0);
+	Reg#(Bit#(3)) loadMatrixBCol <- mkReg(0);
+
+	rule loadMatirxA (loadMatrixARow < 4 && loadMatrixACol < 4);
+		inputAQ.deq;
+		matrixA[loadMatrixARow].enq(unpack(inputAQ.first));
+		// $write( "Loading A[%d][%d] = %x\n", loadMatrixARow, loadMatrixACol, inputAQ.first );
+		if (loadMatrixARow == 3 && loadMatrixACol == 3) begin
+			// Finished loading matrix A
+		end else if (loadMatrixACol == 3) begin
+			loadMatrixARow <= loadMatrixARow + 1;
+			loadMatrixACol <= 0;
+		end else begin
+			loadMatrixACol <= loadMatrixACol + 1;
+		end
+	endrule
+
+	rule loadMatirxB (loadMatrixBRow < 4 && loadMatrixBCol < 4);
+		inputBQ.deq;
+		matrixB[loadMatrixBCol].enq(unpack(inputBQ.first));
+		// $write( "Loading B[%d][%d] = %x\n", loadMatrixBRow, loadMatrixBCol, inputBQ.first );
+		if (loadMatrixBRow == 3 && loadMatrixBCol == 3) begin
+			// Finished loading matrix B
+		end else if (loadMatrixBCol == 3) begin
+			loadMatrixBRow <= loadMatrixBRow + 1;
+			loadMatrixBCol <= 0;
+		end else begin
+			loadMatrixBCol <= loadMatrixBCol + 1;
+		end
+	endrule
+
+	PEIfc pes[4][4];
 	for (Integer i = 0; i < 4; i = i + 1) begin
 		for (Integer j = 0; j < 4; j = j + 1) begin
 			pes[i][j] <- mkPE;
 		end
 	end
 
-	FIFO#(Bit#(32)) fifoA[4][5]; // Additional column for input
-	FIFO#(Bit#(32)) fifoB[5][4]; // Additional row for input
+	for (Integer i = 0; i < 4; i = i + 1) begin
+		rule sendMatrixA;
+			matrixA[i].deq;
+			pes[i][0].receiveA(pack(matrixA[i].first));
+			$write( "A [%d][          ?] -> PE[%d][          0]\n", i, i);
+		endrule
+
+		rule sendMatrixB;
+			matrixB[i].deq;
+			pes[0][i].receiveB(pack(matrixB[i].first));
+			$write( "B [          ?][%d] -> PE[          0][%d]\n", i, i);
+		endrule
+	end
 
 	for (Integer i = 0; i < 4; i = i + 1) begin
-		for (Integer j = 0; j < 5; j = j + 1) begin
-			fifoA[i][j] <- mkFIFO;
-		end
-	end
-	for (Integer i = 0; i < 5; i = i + 1) begin
-		for (Integer j = 0; j < 4; j = j + 1) begin
-			fifoB[i][j] <- mkFIFO;
-		end
-	end
-
-	// Rules to pass A and B through the array
-	for (Integer i = 0; i < 4; i = i + 1) begin
-		for (Integer j = 0; j < 4; j = j + 1) begin
-			rule passA;
-				fifoA[i][j].deq;
-				pes[i][j].receiveA(fifoA[i][j].first);
-				fifoA[i][j+1].enq(fifoA[i][j].first);
-			endrule
-
-			// Pass B to the PE and to the next FIFO
-			rule passB;
-				fifoB[i][j].deq;
-				pes[i][j].receiveB(fifoB[i][j].first);
-				fifoB[i+1][j].enq(fifoB[i][j].first);
+		for (Integer j = 0; j + 1< 4; j = j + 1) begin
+			rule sendAToPE;
+				let a <- pes[i][j].sendA();
+				pes[i][j + 1].receiveA(a);
+				$write( "PE[%d][%d] -> PE[%d][%d]\n", i, j, i, j + 1 );
 			endrule
 		end
 	end
 
-	method Action loadMatrixA(Vector#(4, Vector#(4, Bit#(8))) matrixA);
-		// Enqueue matrix A elements into fifoA[i][0]
-		for (Integer i = 0; i < 4; i = i + 1) begin
-			for (Integer k = 0; k < 4; k = k + 1) begin
-				fifoA[i][0].enq(matrixA[i][k]);
-			end
+	for (Integer i = 0; i + 1 < 4; i = i + 1) begin
+		for (Integer j = 0; j < 4; j = j + 1) begin
+			rule sendBToPE;
+				let b <- pes[i][j].sendB();
+				pes[i + 1][j].receiveB(b);
+				$write( "PE[%d][%d] -> PE[%d][%d]\n", i, j, i + 1, j );
+			endrule
 		end
-	endmethod
+	end
 
-	method Action loadMatrixB(Vector#(4, Vector#(4, Bit#(8))) matrixB);
-		// Enqueue matrix B elements into fifoB[0][j]
-		for (Integer k = 0; k < 4; k = k + 1) begin
-			for (Integer j = 0; j < 4; j = j + 1) begin
-				fifoB[0][j].enq(matrixB[k][j]);
-			end
+
+	rule finishAcceleration;
+		let r <- pes[3][3].getResult();
+		$write( "Acceleration done! %d cycles\n", cycles - processingStartCycle );
+	endrule
+
+	FIFO#(Bit#(32)) flushOutQ <- mkFIFO;
+	Reg#(Bool) isFlushFinished <- mkReg(False);
+	Reg#(Bit#(2)) flushOutputMatrixI <- mkReg(0);
+	Reg#(Bit#(2)) flushOutputMatrixJ <- mkReg(0);
+	rule flushOutput ( !isFlushFinished );
+		let r <- pes[flushOutputMatrixI][flushOutputMatrixJ].getResult();
+		outputQ.enq(pack(r));
+		//$write( "Flushing result[%d][%d] = %x\n", flushOutputMatrixI, flushOutputMatrixJ, r );
+		
+		if (flushOutputMatrixJ == 3 && flushOutputMatrixI == 3) begin
+			flushOutputMatrixI <= 0;
+			flushOutputMatrixJ <= 0;
+			isFlushFinished <= True;
+		end else if (flushOutputMatrixJ == 3) begin
+			flushOutputMatrixI <= flushOutputMatrixI + 1;
+			flushOutputMatrixJ <= 0;
+		end else begin
+			flushOutputMatrixJ <= flushOutputMatrixJ + 1;
 		end
-	endmethod
+	endrule
 
-
-	method ActionValue#(Vector#(4, Vector#(4, Bit#(8)))) getResult();
-		Vector#(4, Vector#(4, Bit#(8))) result = replicate(replicate(0));
-		for (Integer i = 0; i < 4; i = i + 1) begin
-			for (Integer j = 0; j < 4; j = j + 1) begin
-				let val <- pes[i][j].getResult();
-				result[i][j] = val;
-			end
-		end
-		return result;
-	endmethod
-
-endmodule
-
-interface HwMainIfc;
-	method ActionValue#(Bit#(8)) serial_tx;
-	method Action serial_rx(Bit#(8) rx);
-endinterface
-
-typedef enum {IDLE, LOADING, PROCESSING, OUTPUTTING} State deriving (Eq, Bits);
-
-module mkHwMain#(Ulx3sSdramUserIfc mem) (HwMainIfc);
-    Clock curclk <- exposeCurrentClock;
-    Reset currst <- exposeCurrentReset;
-
-    Reg#(Bit#(32)) cycles <- mkReg(0);
-    rule incCyclecount;
-        cycles <= cycles + 1;
-    endrule
-
-    Reg#(Bit#(32)) processingStartCycle <- mkReg(0);
-    Reg#(Bit#(5)) inputEnqueued <- mkReg(0);
-
-    FIFO#(Bit#(32)) inputAQ <- mkSizedBRAMFIFO(32);
-    FIFO#(Bit#(32)) inputBQ <- mkSizedBRAMFIFO(32);
-    Reg#(Vector#(4, Vector#(4, Bit#(8)))) matrixA_bits <- mkReg(replicate(replicate(0)));
-    Reg#(Vector#(4, Vector#(4, Bit#(8)))) matrixB_bits <- mkReg(replicate(replicate(0)));
-
-    MatrixMultiplierInterface systolicArray <- mkSystolicArray();
-
-    Reg#(Bit#(5)) loadMatrixCnt <- mkReg(0);
-    Reg#(Bit#(2)) loadMatrixCol <- mkReg(0);
-    Reg#(Bit#(2)) loadMatrixRow <- mkReg(0);
-    rule loadMatrix (loadMatrixCnt < 16);
-        inputAQ.deq;
-        inputBQ.deq;
-
-        Vector#(4, Bit#(8)) rowA = matrixA_bits[loadMatrixRow];
-        Vector#(4, Bit#(8)) rowB = matrixB_bits[loadMatrixRow];
-
-        rowA = inputAQ.first;
-        rowB = inputBQ.first;
-
-        matrixA_bits <= rowA;
-        matrixB_bits <= rowB;
-
-        loadMatrixCnt <= loadMatrixCnt + 1;
-        loadMatrixCol <= loadMatrixCol + 1;
-        if (loadMatrixCol == 3) begin
-            loadMatrixRow <= loadMatrixRow + 1;
-            loadMatrixCol <= 0;
-        end
-
-        if (loadMatrixCnt == 16) begin
-            systolicArray.loadMatrixA(matrixA_bits);
-            systolicArray.loadMatrixB(matrixB_bits);
-            loadMatrixCnt <= 0;
-            loadMatrixRow <= 0;
-            loadMatrixCol <= 0;
-            processingStartCycle <= cycles;
-        end
-    endrule
-
-    Reg#(Bool) computationDone <- mkReg(False);
-	Reg#(Vector#(4, Vector#(4, Bit#(8)))) resultMatrix <- mkReg(replicate(replicate(0)));
-    rule getSystolicResult (!computationDone);
-        let result <- systolicArray.getResult();
-        resultMatrix <= result;
-        computationDone <= True;
-        $write("Processing done in %d cycles\n", cycles - processingStartCycle);
-    endrule
+	Reg#(Bit#(5)) inputEnqueued <- mkReg(0);
 
 	Reg#(Vector#(4,Bit#(8))) outputDeSerializer <- mkReg(?);
-	Reg#(Vector#(4, Bit#(8))) inputDeSerializer <- mkReg(?);
-    Reg#(Bit#(2)) inputDeSerializerIdx <- mkReg(0);
+	Reg#(Bit#(2)) outputDeSerializerIdx <- mkReg(0);
+	
+	Reg#(Vector#(4,Bit#(8))) inputDeSerializer <- mkReg(?);
+	Reg#(Bit#(2)) inputDeSerializerIdx <- mkReg(0);
 
-    method ActionValue#(Bit#(8)) serial_tx;
-		Bit#(8) ret = resultMatrix[loadMatrixRow][loadMatrixCol];
-		if (loadMatrixCol == 3 && loadMatrixRow == 3) begin
-			loadMatrixRow <= 0;
-			loadMatrixCol <= 0;
-		end else if (loadMatrixCol == 3) begin
-			loadMatrixRow <= loadMatrixRow + 1;
-			loadMatrixCol <= 0;
+	method ActionValue#(Bit#(8)) serial_tx;
+		Bit#(8) ret = 0;
+		if ( outputDeSerializerIdx == 0 ) begin
+			outputQ.deq;
+			Vector#(4,Bit#(8)) ser_value = unpack(outputQ.first);
+
+			outputDeSerializer <= ser_value;
+			ret = ser_value[0];
 		end else begin
-			loadMatrixCol <= loadMatrixCol + 1;
+			ret = outputDeSerializer[outputDeSerializerIdx];
 		end
+		outputDeSerializerIdx <= outputDeSerializerIdx + 1;
 		return ret;
-    endmethod
+	endmethod
 
-    method Action serial_rx(Bit#(8) d);
-        Vector#(4, Bit#(8)) des_value = inputDeSerializer;
-        des_value[inputDeSerializerIdx] = d;
-        inputDeSerializerIdx <= inputDeSerializerIdx + 1;
-        inputDeSerializer <= des_value;
+	method Action serial_rx(Bit#(8) d);
+		Vector#(4,Bit#(8)) des_value = inputDeSerializer;
+		des_value[inputDeSerializerIdx] = d;
+		inputDeSerializerIdx <= inputDeSerializerIdx + 1;
+		inputDeSerializer <= des_value;
 
-        if (inputDeSerializerIdx == 3) begin
-            if (inputEnqueued < 16) begin
-                inputAQ.enq(pack(des_value));
-            end else begin
-                inputBQ.enq(pack(des_value));
-            end
-            inputEnqueued <= inputEnqueued + 1;
-            inputDeSerializerIdx <= 0;
 
-            if (inputEnqueued == 31) begin
+		if (inputDeSerializerIdx == 3 ) begin
+			// How is input being split to A and B correctly, even when there is more than 32 inputs?
+			if ( inputEnqueued < 16 ) begin
+				inputAQ.enq(pack(des_value));
+			end else begin
+				inputBQ.enq(pack(des_value));
+			end
+			inputEnqueued <= inputEnqueued + 1;
+
+			if (inputEnqueued == 31 ) begin
 				processingStartCycle <= cycles;
-                $write("All inputs received at cycle %d\n", cycles);
-            end
-        end
-    endmethod
+			end
+		end
+	endmethod
 endmodule
