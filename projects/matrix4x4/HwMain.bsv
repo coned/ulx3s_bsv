@@ -108,8 +108,10 @@ module mkHwMain#(Ulx3sSdramUserIfc mem) (HwMainIfc);
 	FIFO#(Bit#(32)) inputBQ <- mkSizedBRAMFIFO(32);
 	FIFO#(Bit#(32)) outputQ <- mkSizedBRAMFIFO(32);
 
-	Vector#(4, FIFO#(Bit#(32))) matrixA <- replicateM(mkSizedBRAMFIFO(32));
-	Vector#(4, FIFO#(Bit#(32))) matrixB <- replicateM(mkSizedBRAMFIFO(32));
+	Vector#(4, FIFO#(Bit#(32))) matrixA <- replicateM(mkFIFO);
+	Vector#(4, FIFO#(Bit#(32))) matrixB <- replicateM(mkFIFO);
+	Reg#(Bit#(32)) matrixBbuffer <- mkReg(0);
+	Reg#(Bool) isMatrixBbufferOccupied <- mkReg(False);
 
 	Reg#(Bit#(3)) loadMatrixARow <- mkReg(0);
 	Reg#(Bit#(3)) loadMatrixBRow <- mkReg(0);
@@ -130,9 +132,16 @@ module mkHwMain#(Ulx3sSdramUserIfc mem) (HwMainIfc);
 		end
 	endrule
 
-	rule loadMatrixB;
+	rule loadMatrixBtoBuffer (!isMatrixBbufferOccupied);
 		inputBQ.deq;
-		matrixB[loadMatrixBRow].enq(unpack(inputBQ.first));
+		matrixBbuffer <= inputBQ.first;
+		isMatrixBbufferOccupied <= True;
+	endrule
+
+
+	rule loadMatrixBfromBuffer (isMatrixBbufferOccupied);
+		matrixB[loadMatrixBRow].enq(unpack(matrixBbuffer));
+		isMatrixBbufferOccupied <= False;
 		//$write( "Loading B[%d][%d] = %x\n", loadMatrixBRow, loadMatrixBCol, inputBQ.first );
 		if (loadMatrixBRow == 3 && loadMatrixBCol == 3) begin
 			// Finished loading matrix B
@@ -220,6 +229,21 @@ module mkHwMain#(Ulx3sSdramUserIfc mem) (HwMainIfc);
 	
 	Reg#(Vector#(4,Bit#(8))) inputDeSerializer <- mkReg(?);
 	Reg#(Bit#(2)) inputDeSerializerIdx <- mkReg(0);
+	Reg#(Bool) isEnqueued <- mkReg(True);
+
+	rule enqueueInput (!isEnqueued && inputDeSerializerIdx == 0);
+		if ( inputEnqueued < 16 ) begin
+			inputAQ.enq(pack(inputDeSerializer));
+		end else begin
+			inputBQ.enq(pack(inputDeSerializer));
+		end
+		inputEnqueued <= inputEnqueued + 1;
+		isEnqueued <= True;
+
+		if (inputEnqueued == 31) begin
+			processingStartCycle <= cycles;
+		end
+	endrule
 
 	method ActionValue#(Bit#(8)) serial_tx;
 		Bit#(8) ret = 0;
@@ -236,25 +260,13 @@ module mkHwMain#(Ulx3sSdramUserIfc mem) (HwMainIfc);
 		return ret;
 	endmethod
 
-	method Action serial_rx(Bit#(8) d);
+	method Action serial_rx(Bit#(8) d) if (isEnqueued);
 		Vector#(4,Bit#(8)) des_value = inputDeSerializer;
 		des_value[inputDeSerializerIdx] = d;
 		inputDeSerializerIdx <= inputDeSerializerIdx + 1;
 		inputDeSerializer <= des_value;
-
-
-		if (inputDeSerializerIdx == 3 ) begin
-			// How is input being split to A and B correctly, even when there is more than 32 inputs?
-			if ( inputEnqueued < 16 ) begin
-				inputAQ.enq(pack(des_value));
-			end else begin
-				inputBQ.enq(pack(des_value));
-			end
-			inputEnqueued <= inputEnqueued + 1;
-
-			if (inputEnqueued == 31) begin
-				processingStartCycle <= cycles;
-			end
+		if (inputDeSerializerIdx == 3) begin
+			isEnqueued <= False;
 		end
 	endmethod
 endmodule
