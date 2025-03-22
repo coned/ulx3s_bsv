@@ -205,22 +205,29 @@ module mkHwMain#(Ulx3sSdramUserIfc mem) (HwMainIfc);
 	Reg#(Bool) isFlushFinished <- mkReg(False);
 	Reg#(Bit#(2)) flushOutputMatrixI <- mkReg(0);
 	Reg#(Bit#(2)) flushOutputMatrixJ <- mkReg(0);
+	// FIFO#(Bit#(32)) outputQbuff <- mkFIFO;
 	rule flushOutput ( !isFlushFinished );
 		let r <- pes[flushOutputMatrixI][flushOutputMatrixJ].getResult();
 		outputQ.enq(pack(r));
 		//$write( "Flushing result[%d][%d] = %x\n", flushOutputMatrixI, flushOutputMatrixJ, r );
 		
-		if (flushOutputMatrixJ == 3 && flushOutputMatrixI == 3) begin
-			flushOutputMatrixI <= 0;
+		if (flushOutputMatrixJ == 3) begin
 			flushOutputMatrixJ <= 0;
-			isFlushFinished <= True;
-		end else if (flushOutputMatrixJ == 3) begin
-			flushOutputMatrixI <= flushOutputMatrixI + 1;
-			flushOutputMatrixJ <= 0;
+			if (flushOutputMatrixI == 3) begin
+				flushOutputMatrixI <= 0;
+				isFlushFinished <= True;
+			end else begin
+				flushOutputMatrixI <= flushOutputMatrixI + 1;
+			end
 		end else begin
 			flushOutputMatrixJ <= flushOutputMatrixJ + 1;
 		end
 	endrule
+
+	// rule buffToOutputQ;
+	// 	outputQbuff.deq;
+	// 	outputQ.enq(outputQbuff.first);
+	// endrule
 
 	Reg#(Bit#(5)) inputEnqueued <- mkReg(0);
 
